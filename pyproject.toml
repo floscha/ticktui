@@ -1,0 +1,17 @@
+[project]
+name = "ticktui"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "keyring>=25.7.0",
+    "python-dotenv>=1.2.1",
+    "textual>=7.5.0",
+]
+
+[project.scripts]
+ticktui = "ticktui.app:main"
+
+[tool.uv]
+package = true
