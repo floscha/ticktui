@@ -11,7 +11,8 @@ dependencies = [
 ]
 
 [project.scripts]
-ticktui = "ticktui.app:main"
+ticktui = "ticktui.__main__:main"
+ticktui-cli = "ticktui.cli:main"
 
 [tool.uv]
 package = true

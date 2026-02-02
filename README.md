@@ -2,14 +2,6 @@
 
 A CLI and terminal user interface for interacting with the TickTick task manager.
 
-## Features
-
-- 🎯 **Lazygit-inspired interface** - Three-panel layout with projects, tasks, and details
-- ⌨️ **Vim-style navigation** - Use `j/k` or arrow keys to navigate
-- ✅ **Full task management** - Create, edit, complete, and delete tasks
-- 🔄 **Real-time sync** - Connects to TickTick's official REST API
-- 🎨 **Rich display** - Priority indicators, completion status, and due dates
-
 ## Setup
 
 ### Installation
@@ -31,11 +23,13 @@ uv sync
 4. Set the **Redirect URI** to `http://localhost:8080/callback`
 5. Note your **Client ID** and **Client Secret**
 
-## Usage
+## TUI Usage
+
+Start with `uv run ticktui`
 
 ### Keyboard Shortcuts
 
-#### Navigation
+Navigation:
 
 | Key | Action |
 |-----|--------|
@@ -46,7 +40,7 @@ uv sync
 | `Tab` | Next panel |
 | `Shift+Tab` | Previous panel |
 
-#### Actions
+Actions:
 
 | Key | Action |
 |-----|--------|
@@ -57,6 +51,60 @@ uv sync
 | `r` | Refresh data |
 | `?` | Show help |
 | `q` | Quit |
+
+## CLI Usage
+
+### Tasks
+
+```bash
+ticktui tasks list
+ticktui tasks list --list 
+ticktui tasks add <task_title> --date <date_or_datetime> --list <list_name>
+ticktui tasks edit <task_id> --title <new_title> --date <new_date_or_datetime>
+ticktui tasks complete <task_id>
+ticktui tasks delete <task_id>
+
+# `today` is a shortcut to access tasks scheduled for today.
+ticktui today list
+ticktui today add <task_title> --list <list_name>
+
+# `inbox` is a shortcut to access tasks in the built-in inbox list.
+ticktui today list
+ticktui today add <task_title> --date <date_or_datetime>
+```
+
+### Lists
+
+```bash
+ticktui lists list
+ticktui lists add <tag_name>
+ticktui lists rename <old_list_name> <new_list_name>
+ticktui lists delete <tag_name>
+```
+
+### Folders
+
+```bash
+ticktui folder list
+ticktui folder add <tag_name>
+ticktui folder rename <old_folder_name> <new_folder_name>
+ticktui folder delete <tag_name>
+```
+
+### Tags
+
+```bash
+ticktui tags list
+ticktui tags add <tag_name>
+ticktui tags rename <old_tag_name> <new_tag_name>
+ticktui tags delete <tag_name>
+```
+
+### General Options
+
+```bash
+ticktui <command> --show-completed
+```
 
 ## License
 

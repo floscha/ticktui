@@ -23,8 +23,8 @@ class Task:
     due_date: Optional[datetime] = None
     start_date: Optional[datetime] = None
     is_all_day: bool = False
-    tags: list[str] = None
-    items: list[dict] = None  # Subtasks/checklist items
+    tags: Optional[list[str]] = None
+    items: Optional[list[dict]] = None  # Subtasks/checklist items
     
     def __post_init__(self):
         if self.tags is None:
@@ -239,6 +239,108 @@ class TickTickClient:
         """Close the HTTP client."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+
+    # ---- CLI convenience helpers (best-effort) ----
+    async def resolve_project_by_name(self, name: str) -> Project:
+        """Resolve a project by case-insensitive name."""
+        name_norm = name.strip().casefold()
+        projects = await self.get_projects()
+        for p in projects:
+            if p.name.strip().casefold() == name_norm:
+                return p
+        raise ValueError(f"Unknown list/project: {name}")
+
+    async def resolve_inbox_project(self) -> Project:
+        """Best-effort attempt to find TickTick's built-in Inbox project."""
+        projects = await self.get_projects()
+        for p in projects:
+            if p.name.strip().casefold() == "inbox":
+                return p
+        # Fallback: many accounts always have an Inbox-like first project
+        if projects:
+            return projects[0]
+        raise ValueError("No projects returned from TickTick")
+
+    async def get_task_any_project(self, task_id: str) -> Task:
+        """Find a task by id across all projects.
+
+        This is less efficient than keeping project_id around, but it's handy
+        for CLI commands where only a task id is provided.
+        """
+        projects = await self.get_projects()
+        last_error: Exception | None = None
+        for project in projects:
+            try:
+                return await self.get_task(project.id, task_id)
+            except httpx.HTTPStatusError as e:
+                # 404 (or other) in a project means "not here".
+                last_error = e
+                continue
+        if last_error:
+            raise ValueError(f"Task not found: {task_id}") from last_error
+        raise ValueError(f"Task not found: {task_id}")
+
+    async def get_tasks_for_today(self, include_completed: bool = False) -> list[Task]:
+        """Return tasks whose due date is today (local date)."""
+        all_tasks = await self.get_all_tasks()
+        today = datetime.now().date()
+        out: list[Task] = []
+        for t in all_tasks:
+            if not include_completed and t.is_completed:
+                continue
+            if t.due_date and t.due_date.date() == today:
+                out.append(t)
+        return out
+
+    async def get_groups(self) -> list[dict]:
+        """Best-effort: fetch project groups (folders).
+
+        The TickTick Open API doesn't clearly document group endpoints. We try a
+        likely path and fall back to an empty list.
+        """
+        client = await self._get_client()
+        try:
+            response = await client.get(
+                f"{self.OPEN_API_URL}/project/group",
+                headers=self._headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list):
+                return data
+            return []
+        except httpx.HTTPError:
+            return []
+
+    async def filter_tasks_by_folder_name(self, tasks: list[Task], folder_name: str) -> list[Task]:
+        """Filter tasks to those whose project belongs to a folder/group name."""
+        folder_name_norm = folder_name.strip().casefold()
+        groups = await self.get_groups()
+        group_id: str | None = None
+        for g in groups:
+            if str(g.get("name", "")).strip().casefold() == folder_name_norm:
+                group_id = str(g.get("id"))
+                break
+        if not group_id:
+            return []
+
+        projects = await self.get_projects()
+        project_ids = {p.id for p in projects if p.group_id == group_id}
+        return [t for t in tasks if t.project_id in project_ids]
+
+    async def get_tags(self) -> list[str]:
+        """Best-effort: derive tags from tasks.
+
+        If the Open API doesn't support a tags endpoint, scan tasks and return
+        unique tag names.
+        """
+        tasks = await self.get_all_tasks()
+        tag_set: set[str] = set()
+        for t in tasks:
+            for tag in (t.tags or []):
+                if isinstance(tag, str) and tag.strip():
+                    tag_set.add(tag.strip())
+        return sorted(tag_set)
     
     # Project endpoints
     async def get_projects(self) -> list[Project]:
@@ -344,14 +446,14 @@ class TickTickClient:
 class TokenStorage:
     """Simple file-based token storage."""
     
-    def __init__(self, path: str = None):
+    def __init__(self, path: Optional[str] = None):
         if path is None:
             config_dir = os.path.join(os.path.expanduser("~"), ".config", "ticktui")
             os.makedirs(config_dir, exist_ok=True)
             path = os.path.join(config_dir, "tokens.json")
         self.path = path
     
-    def save(self, access_token: str, refresh_token: str = None) -> None:
+    def save(self, access_token: str, refresh_token: Optional[str] = None) -> None:
         """Save tokens to file."""
         data = {"access_token": access_token}
         if refresh_token:
