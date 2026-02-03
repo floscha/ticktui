@@ -85,9 +85,14 @@ async def cmd_tasks_list(args: argparse.Namespace) -> int:
         if not args.show_completed:
             tasks = [t for t in tasks if not t.is_completed]
 
-        if args.folder:
+        if args.list_name:
+            project = await client.resolve_project_by_name(args.list_name)
+            tasks = [t for t in tasks if t.project_id == project.id]
+
+        folder = args.folder
+        if folder:
             # Folder support is group-based; best-effort filter by group name.
-            tasks = await client.filter_tasks_by_folder_name(tasks, folder_name=args.folder)
+            tasks = await client.filter_tasks_by_folder_name(tasks, folder_name=folder)
 
         for t in tasks:
             due = t.due_date.isoformat() if t.due_date else ""
@@ -284,7 +289,18 @@ def build_parser() -> argparse.ArgumentParser:
     tasks_sub = tasks.add_subparsers(dest="tasks_command", required=True)
 
     tasks_list = tasks_sub.add_parser("list")
-    tasks_list.add_argument("--folder", dest="folder", default=None)
+    tasks_list.add_argument(
+        "--list",
+        dest="list_name",
+        default=None,
+        help="Only show tasks from this list/project (by name)",
+    )
+    tasks_list.add_argument(
+        "--folder",
+        dest="folder",
+        default=None,
+        help="Only show tasks from this folder (group) (by name)",
+    )
     tasks_list.add_argument(
         "--show-completed",
         dest="show_completed",
