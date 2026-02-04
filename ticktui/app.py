@@ -21,6 +21,8 @@ from .api import TickTickClient, TickTickAuth, Task, Project, TokenStorage
 from .oauth import perform_oauth_flow
 
 import asyncio
+from dataclasses import dataclass
+from datetime import date
 
 
 class ProjectItem(ListItem):
@@ -32,6 +34,52 @@ class ProjectItem(ListItem):
     
     def compose(self) -> ComposeResult:
         yield Label(f"● {self.project.name}", classes="project-label")
+
+
+@dataclass(frozen=True)
+class SidebarSection:
+    """Represents an entry in the left sidebar.
+
+    `kind` is one of: "today", "tomorrow", "inbox", "project".
+    For kind="project", `project` will be set.
+    """
+
+    kind: str
+    title: str
+    project: Project | None = None
+
+
+class SidebarSectionItem(ListItem):
+    """A list item representing a sidebar section (Today/Tomorrow/Inbox/Project)."""
+
+    def __init__(self, section: SidebarSection) -> None:
+        super().__init__()
+        self.section = section
+
+    def compose(self) -> ComposeResult:
+        icon = {
+            "today": "☀",
+            "tomorrow": "☾",
+            "inbox": "📥",
+            "project": "●",
+        }.get(self.section.kind, "●")
+        yield Label(f"{icon} {self.section.title}", classes="project-label")
+
+
+def _as_local_date(dt) -> date | None:
+    """Return the due date as a local `date` (best-effort).
+
+    TickTick dates may be timezone-aware; `date()` uses the datetime's timezone.
+    If the datetime is naive, it's treated as local.
+    """
+
+    if dt is None:
+        return None
+    try:
+        return dt.astimezone().date() if dt.tzinfo else dt.date()
+    except Exception:
+        # If anything is weird, ignore due date bucketing.
+        return None
 
 
 class TaskItem(ListItem):
@@ -56,7 +104,7 @@ class TaskItem(ListItem):
 class TaskDetail(Static):
     """Panel showing task details."""
     
-    def __init__(self, current_task: Task = None, **kwargs) -> None:
+    def __init__(self, current_task: Task | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
         self._current_task = current_task
     
@@ -551,6 +599,7 @@ class MainScreen(Screen):
         self.tasks: list[Task] = []
         self.current_project: Project | None = None
         self.current_task: Task | None = None
+        self.current_section: SidebarSection | None = None
         self._panel_order = ["projects-list", "tasks-list"]
         self._current_panel_idx = 0
     
@@ -578,7 +627,7 @@ class MainScreen(Screen):
         self.query_one("#projects-list", ListView).focus()
     
     async def load_projects(self) -> None:
-        """Load projects from the API."""
+        """Load projects from the API and populate the sidebar sections."""
         projects_list = self.query_one("#projects-list", ListView)
         projects_list.clear()
         projects_list.append(ListItem(Label("[dim]Loading...[/]", markup=True)))
@@ -586,19 +635,107 @@ class MainScreen(Screen):
         try:
             self.projects = await self.app.client.get_projects()
             projects_list.clear()
-            
+
+            # Top sections
+            sections: list[SidebarSection] = [
+                SidebarSection(kind="today", title="Today"),
+                SidebarSection(kind="tomorrow", title="Tomorrow"),
+                SidebarSection(kind="inbox", title="Inbox"),
+            ]
+
+            # Then regular projects
             for project in self.projects:
-                projects_list.append(ProjectItem(project))
-            
-            # Select first project
-            if self.projects:
+                sections.append(
+                    SidebarSection(kind="project", title=project.name, project=project)
+                )
+
+            for section in sections:
+                projects_list.append(SidebarSectionItem(section))
+
+            # Select first section (Today)
+            if sections:
                 projects_list.index = 0
-                self.current_project = self.projects[0]
-                await self.load_tasks(self.current_project.id)
+                self.current_section = sections[0]
+                await self.load_tasks_for_section(self.current_section)
         except Exception as e:
             projects_list.clear()
             projects_list.append(ListItem(Label(f"[red]Error: {e}[/]", markup=True)))
             self.notify(f"Failed to load projects: {e}", severity="error")
+
+    async def load_tasks_for_section(self, section: SidebarSection) -> None:
+        """Load tasks based on the selected sidebar section."""
+
+        if section.kind == "project":
+            if section.project is None:
+                return
+            self.current_project = section.project
+            await self.load_tasks(self.current_project.id)
+            return
+
+        # Keep current_project in sync for create/edit actions.
+        if section.kind == "inbox":
+            try:
+                self.current_project = await self.app.client.resolve_inbox_project()
+            except Exception:
+                self.current_project = None
+            await self.load_special_tasks(kind="inbox")
+            return
+
+        if section.kind in {"today", "tomorrow"}:
+            # Pick Inbox as default target for new tasks if possible.
+            try:
+                self.current_project = await self.app.client.resolve_inbox_project()
+            except Exception:
+                self.current_project = None
+            await self.load_special_tasks(kind=section.kind)
+            return
+
+        # Unknown section
+        await self.load_special_tasks(kind="unknown")
+
+    async def load_special_tasks(self, kind: str) -> None:
+        """Load tasks for logical sections like Today/Tomorrow/Inbox."""
+
+        tasks_list = self.query_one("#tasks-list", ListView)
+        tasks_list.clear()
+        tasks_list.append(ListItem(Label("[dim]Loading...[/]", markup=True)))
+
+        try:
+            all_tasks = await self.app.client.get_all_tasks()
+            # Filter incomplete by default
+            relevant = [t for t in all_tasks if not t.is_completed]
+
+            if kind == "inbox":
+                inbox = await self.app.client.resolve_inbox_project()
+                relevant = [t for t in relevant if t.project_id == inbox.id]
+            elif kind in {"today", "tomorrow"}:
+                today = date.today()
+                target = today if kind == "today" else today.fromordinal(today.toordinal() + 1)
+                relevant = [t for t in relevant if _as_local_date(t.due_date) == target]
+            else:
+                relevant = []
+
+            self.tasks = relevant
+            tasks_list.clear()
+
+            # Sort tasks: incomplete first, then by priority (high to low)
+            self.tasks.sort(key=lambda t: (t.is_completed, -t.priority))
+
+            for task in self.tasks:
+                tasks_list.append(TaskItem(task))
+
+            if not self.tasks:
+                tasks_list.append(ListItem(Label("[dim]No tasks[/]", markup=True)))
+                self.current_task = None
+                self.update_task_detail()
+            else:
+                tasks_list.index = 0
+                self.current_task = self.tasks[0]
+                self.update_task_detail()
+        except Exception as e:
+            tasks_list.clear()
+            tasks_list.append(ListItem(Label(f"[red]Error: {e}[/]", markup=True)))
+            self.notify(f"Failed to load tasks: {e}", severity="error")
     
     async def load_tasks(self, project_id: str) -> None:
         """Load tasks for a project."""
@@ -634,17 +771,17 @@ class MainScreen(Screen):
     
     @on(ListView.Selected, "#projects-list")
     async def on_project_selected(self, event: ListView.Selected) -> None:
-        """Handle project selection."""
-        if isinstance(event.item, ProjectItem):
-            self.current_project = event.item.project
-            await self.load_tasks(self.current_project.id)
+        """Handle sidebar section selection."""
+        if isinstance(event.item, SidebarSectionItem):
+            self.current_section = event.item.section
+            await self.load_tasks_for_section(self.current_section)
     
     @on(ListView.Highlighted, "#projects-list")
     async def on_project_highlighted(self, event: ListView.Highlighted) -> None:
-        """Handle project highlight change."""
-        if isinstance(event.item, ProjectItem):
-            self.current_project = event.item.project
-            await self.load_tasks(self.current_project.id)
+        """Handle sidebar highlight change."""
+        if isinstance(event.item, SidebarSectionItem):
+            self.current_section = event.item.section
+            await self.load_tasks_for_section(self.current_section)
     
     @on(ListView.Selected, "#tasks-list")
     def on_task_selected(self, event: ListView.Selected) -> None:
@@ -720,7 +857,10 @@ class MainScreen(Screen):
         try:
             await self.app.client.create_task(task)
             self.notify(f"Created: {task.title}")
-            await self.load_tasks(self.current_project.id)
+            if self.current_section:
+                await self.load_tasks_for_section(self.current_section)
+            elif self.current_project:
+                await self.load_tasks(self.current_project.id)
         except Exception as e:
             self.notify(f"Failed to create task: {e}", severity="error")
     
@@ -741,7 +881,10 @@ class MainScreen(Screen):
         try:
             await self.app.client.update_task(task)
             self.notify(f"Updated: {task.title}")
-            await self.load_tasks(self.current_project.id)
+            if self.current_section:
+                await self.load_tasks_for_section(self.current_section)
+            elif self.current_project:
+                await self.load_tasks(self.current_project.id)
         except Exception as e:
             self.notify(f"Failed to update task: {e}", severity="error")
     
@@ -761,7 +904,10 @@ class MainScreen(Screen):
                 self.current_task.id
             )
             self.notify(f"Completed: {self.current_task.title}")
-            await self.load_tasks(self.current_project.id)
+            if self.current_section:
+                await self.load_tasks_for_section(self.current_section)
+            elif self.current_project:
+                await self.load_tasks(self.current_project.id)
         except Exception as e:
             self.notify(f"Failed to complete task: {e}", severity="error")
     
@@ -783,18 +929,23 @@ class MainScreen(Screen):
     async def _delete_task(self) -> None:
         """Delete the current task via the API."""
         try:
-            await self.app.client.delete_task(
-                self.current_task.project_id,
-                self.current_task.id
-            )
-            self.notify(f"Deleted: {self.current_task.title}")
-            await self.load_tasks(self.current_project.id)
+            task = self.current_task
+            if not task:
+                return
+            await self.app.client.delete_task(task.project_id, task.id)
+            self.notify(f"Deleted: {task.title}")
+            if self.current_section:
+                await self.load_tasks_for_section(self.current_section)
+            elif self.current_project:
+                await self.load_tasks(self.current_project.id)
         except Exception as e:
             self.notify(f"Failed to delete task: {e}", severity="error")
     
     async def action_refresh(self) -> None:
         """Refresh the current view."""
-        if self.current_project:
+        if self.current_section:
+            await self.load_tasks_for_section(self.current_section)
+        elif self.current_project:
             await self.load_tasks(self.current_project.id)
         await self.load_projects()
         self.notify("Refreshed")
@@ -837,7 +988,7 @@ class TickTUIApp(App):
         else:
             self.push_screen("login")
     
-    def setup_client(self, client_id: str, client_secret: str, access_token: str, refresh_token: str = None) -> None:
+    def setup_client(self, client_id: str, client_secret: str, access_token: str, refresh_token: str | None = None) -> None:
         """Set up the TickTick client with credentials."""
         self.auth = TickTickAuth(client_id, client_secret)
         self.auth.access_token = access_token
